@@ -10,6 +10,9 @@ dist/
 *.session
 *.session-journal
 
+# персональная информация
+resume.md
+
 # Логи и временные файлы
 *.log
 .DS_Store
