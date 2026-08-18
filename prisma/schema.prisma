@@ -1,0 +1,16 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Таблица для хранения сообщений из чата
+model Message {
+  id        Int      @id @default(autoincrement())
+  sender    String   // 'RECRUITER' (Сбер) или 'ME' (Мы)
+  text      String   // Текст сообщения
+  createdAt DateTime @default(now()) // Дата и время
+}
