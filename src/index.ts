@@ -25,7 +25,7 @@ const resumePath = path.join(process.cwd(), "resume.md");
 const promptTemplatePath = path.join(process.cwd(), "prompt.md");
 
 if (!fs.existsSync(resumePath) || !fs.existsSync(promptTemplatePath)) {
-    console.error("❌ Ошибка: Убедись, что файлы resume.md и prompt.md лежат в корне проекта!");
+    console.error("❌ Ошибка: Файлы resume.md и prompt.md должны лежать в корне проекта!");
     process.exit(1);
 }
 
@@ -74,19 +74,99 @@ async function startBot() {
                 return;
             }
 
-            const recruiterQuestion = message.message;
-            console.log(`\n📩 [Сбер прислал вопрос]: "${recruiterQuestion}"`);
+            const recruiterQuestion = message.message || "";
+            console.log(`\n📩 [Сбер прислал сообщение]:\n"${recruiterQuestion}"`);
 
             // ШАГ 1: Сохраняем вопрос рекрутера в БД
             await prisma.message.create({
                 data: {
                     sender: "RECRUITER",
-                    text: recruiterQuestion,
+                    text: recruiterQuestion || "[Кнопки выбора / меню]",
                 },
             });
-            console.log("💾 Вопрос сохранен в базу данных.");
+            console.log("💾 Сообщение сохранено в базу данных.");
 
-            // ШАГ 2: Достаем последние 10 сообщений
+            // -------------------------------------------------------------------------
+            // ПРАВИЛО 1: Финал интервью (Прощание) — НЕ ОТВЕЧАЕМ
+            // -------------------------------------------------------------------------
+            if (
+                recruiterQuestion.includes("Спасибо за интервью") ||
+                recruiterQuestion.includes("Пульс") ||
+                recruiterQuestion.includes("передам ваше резюме и итоги")
+            ) {
+                console.log("🎉 [ФИНАЛ] Сбер завершил интервью и передал резюме! Отвечать не требуется.");
+                return;
+            }
+
+            // -------------------------------------------------------------------------
+            // ПРАВИЛО 2: Стартовое согласие на вопросы — ОТВЕЧАЕМ ПРОСТО "Да, готов"
+            // -------------------------------------------------------------------------
+            if (
+                recruiterQuestion.includes("Будет удобно прямо сейчас ответить на несколько вопросов") ||
+                recruiterQuestion.includes("уточнить недостающую информацию по вашему резюме")
+            ) {
+                console.log("👋 [СТАРТ] Приветственное сообщение от Сбера. Отвечаем 'Да, готов'...");
+                const delay = getRandomDelay(3, 5);
+                await sleep(delay);
+
+                const quickAnswer = "Да, готов ответить на вопросы.";
+                await client.sendMessage("Giga_recruiter_bot", { message: quickAnswer });
+
+                await prisma.message.create({
+                    data: { sender: "ME", text: quickAnswer },
+                });
+                console.log("📤 Отправлено согласие на интервью!");
+                return;
+            }
+
+            // -------------------------------------------------------------------------
+            // ПРАВИЛО 3: Интерактивные кнопки (Оценка 5 звезд ИЛИ Выбор вакансии)
+            // -------------------------------------------------------------------------
+            if (message.replyMarkup) {
+                const lowerText = recruiterQuestion.toLowerCase();
+                const isRating = lowerText.includes("оцен") || lowerText.includes("обратн") || lowerText.includes("звезд");
+
+                if (isRating) {
+                    // СЦЕНАРИЙ А: Оценка обратной связи (выбираем 5 звезд = 5-я кнопка с индексом 4)
+                    console.log("⭐ Обнаружен запрос оценки! Выбираем 5 звёзд (5-я кнопка)...");
+                    const delay = getRandomDelay(2, 4);
+                    await sleep(delay);
+
+                    try {
+                        // Нажимаем на 5-ю кнопку (индекс 4)
+                        await message.click({ i: 4 });
+                        console.log("🌟 Успешно поставили оценку 5 звезд!");
+
+                        await prisma.message.create({
+                            data: { sender: "ME", text: "[Поставлена оценка: 5 звезд]" },
+                        });
+                        return;
+                    } catch (err) {
+                        console.log("⚠️ Не удалось нажать 5-ю кнопку, пробуем последнюю доступную:", err);
+                    }
+                } else {
+                    // СЦЕНАРИЙ Б: Выбор вакансии из списка (выбираем первый вариант = кнопка с индексом 0)
+                    console.log("🔘 Обнаружены кнопки выбора вакансии. Выбираем 1-й вариант...");
+                    const delay = getRandomDelay(2, 4);
+                    await sleep(delay);
+
+                    try {
+                        await message.click({ i: 0 });
+                        console.log("👆 Успешно выбрали первый вариант вакансии!");
+
+                        await prisma.message.create({
+                            data: { sender: "ME", text: "[Выбран 1-й вариант вакансии по кнопке]" },
+                        });
+                        return;
+                    } catch (btnErr) {
+                        console.log("⚠️ Ошибка клика по вакансии, переходим к тексту:", btnErr);
+                    }
+                }
+            }
+
+            // -------------------------------------------------------------------------
+            // СТАНДАРТНЫЙ СЦЕНАРИЙ: Генерация ответа через GEMINI AI
+            // -------------------------------------------------------------------------
             const history = await prisma.message.findMany({
                 take: 10,
                 orderBy: { createdAt: "asc" },
@@ -96,38 +176,34 @@ async function startBot() {
                 .map((m) => `${m.sender === "RECRUITER" ? "Рекрутер" : "Кандидат"}: ${m.text}`)
                 .join("\n");
 
-            // ШАГ 3: Подставляем данные в наш секретный шаблон промпта
             const prompt = promptTemplate
                 .replace("{{RESUME}}", resumeContent)
                 .replace("{{HISTORY}}", formattedHistory)
                 .replace("{{QUESTION}}", recruiterQuestion);
 
-            console.log("🧠 Gemini генерирует ответ на основе резюме и истории...");
+            console.log("🧠 Gemini генерирует ответ на основе резюме и контекста...");
             const aiResponse = await model.generateContent(prompt);
             const answerText = aiResponse.response.text().trim();
 
-            console.log(`✨ [Сгенерированный ответ]: "${answerText}"`);
+            console.log(`✨ [Сгенерированный ответ]:\n"${answerText}"`);
 
-            // ШАГ 4: Задержка
             const delay = getRandomDelay(5, 9);
             console.log(`⏳ Имитируем набор текста (${delay / 1000} сек)...`);
             await sleep(delay);
 
-            // ШАГ 5: Отправка в TG
             await client.sendMessage("Giga_recruiter_bot", { message: answerText });
             console.log("📤 Ответ успешно отправлен в Telegram!");
 
-            // ШАГ 6: Сохранение нашего ответа в БД
             await prisma.message.create({
                 data: {
                     sender: "ME",
                     text: answerText,
                 },
             });
-            console.log("💾 Наш ответ записан в базу данных.\n--- Ожидаем следующий вопрос ---");
+            console.log("💾 Наш ответ записан в базу данных.\n--- Ожидаем следующий шаг ---");
 
         } catch (error) {
-            console.error("❌ Ошибка при обработке сообщения:", error);
+            console.error("❌ Ошибка при обработке события:", error);
         }
     }, new NewMessage({}));
 }
